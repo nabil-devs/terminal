@@ -69,7 +69,7 @@ std::vector<til::point_span> Terminal::_GetSelectionSpans() const noexcept
 // - None
 // Return Value:
 // - None
-const til::point Terminal::GetSelectionAnchor() const noexcept
+til::point Terminal::GetSelectionAnchor() const noexcept
 {
     _assertLocked();
     return _selection->start;
@@ -81,7 +81,7 @@ const til::point Terminal::GetSelectionAnchor() const noexcept
 // - None
 // Return Value:
 // - None
-const til::point Terminal::GetSelectionEnd() const noexcept
+til::point Terminal::GetSelectionEnd() const noexcept
 {
     _assertLocked();
     return _selection->end;
@@ -139,7 +139,7 @@ til::point Terminal::SelectionEndForRendering() const
     return til::point{ pos };
 }
 
-const Terminal::SelectionEndpoint Terminal::SelectionEndpointTarget() const noexcept
+Terminal::SelectionEndpoint Terminal::SelectionEndpointTarget() const noexcept
 {
     return _selectionEndpoint;
 }
@@ -148,13 +148,13 @@ const Terminal::SelectionEndpoint Terminal::SelectionEndpointTarget() const noex
 // - Checks if selection is active
 // Return Value:
 // - bool representing if selection is active. Used to decide copy/paste on right click
-const bool Terminal::IsSelectionActive() const noexcept
+bool Terminal::IsSelectionActive() const noexcept
 {
     _assertLocked();
     return _selection->active;
 }
 
-const bool Terminal::IsBlockSelection() const noexcept
+bool Terminal::IsBlockSelection() const noexcept
 {
     _assertLocked();
     return _selection->blockSelection;
@@ -294,9 +294,21 @@ std::pair<til::point, til::point> Terminal::_ExpandSelectionAnchors(std::pair<ti
 
     const auto& buffer = _activeBuffer();
     const auto bufferSize = buffer.GetSize();
+    const auto height = buffer.GetSize().Height();
+
     switch (_multiClickSelectionMode)
     {
     case SelectionExpansion::Line:
+        // climb up to the first row that is wrapped
+        while (start.y > 0 && buffer.GetRowByOffset(start.y - 1).WasWrapForced())
+        {
+            --start.y;
+        }
+        // climb down to the last row that is wrapped
+        while (end.y + 1 < height && buffer.GetRowByOffset(end.y).WasWrapForced())
+        {
+            ++end.y;
+        }
         start = { bufferSize.Left(), start.y };
         end = { bufferSize.RightExclusive(), end.y };
         break;
@@ -350,11 +362,12 @@ void Terminal::ToggleMarkMode()
     {
         // Enter Mark Mode
         // NOTE: directly set cursor state. We already should have locked before calling this function.
-        _activeBuffer().GetCursor().SetIsOn(false);
         if (!IsSelectionActive())
         {
-            // No selection --> start one at the cursor
-            const auto cursorPos{ _activeBuffer().GetCursor().GetPosition() };
+            // If we're scrolled up, use the viewport origin as the selection start.
+            // Otherwise, use the cursor position.
+            const auto cursorPos = _scrollOffset != 0 ? _GetVisibleViewport().Origin() :
+                                                        _activeBuffer().GetCursor().GetPosition();
             *_selection.write() = SelectionInfo{
                 .start = cursorPos,
                 .end = cursorPos,
@@ -426,7 +439,7 @@ void Terminal::ExpandSelectionToWord()
 // Arguments:
 // - dir: the direction we're scanning the buffer in to find the hyperlink of interest
 // Return Value:
-// - true if we found a hyperlink to select (and selected it). False otherwise.
+// - true if we found a hyperlink to select (and selected it); otherwise, false.
 void Terminal::SelectHyperlink(const SearchDirection dir)
 {
     if (_selectionMode != SelectionInteractionMode::Mark)

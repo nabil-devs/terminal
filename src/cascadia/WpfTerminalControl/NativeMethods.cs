@@ -92,14 +92,6 @@ namespace Microsoft.Terminal.Wpf
             WM_MOUSEWHEEL = 0x020A,
         }
 
-        public enum VirtualKey : ushort
-        {
-            /// <summary>
-            /// ALT key
-            /// </summary>
-            VK_MENU = 0x12,
-        }
-
         [Flags]
         public enum SetWindowPosFlags : uint
         {
@@ -225,9 +217,6 @@ namespace Microsoft.Terminal.Wpf
 
         [DllImport("Microsoft.Terminal.Control.dll", CharSet = CharSet.Unicode, CallingConvention = CallingConvention.StdCall, PreserveSig = false)]
         public static extern void TerminalSetTheme(IntPtr terminal, [MarshalAs(UnmanagedType.Struct)] TerminalTheme theme, string fontFamily, short fontSize, int newDpi);
-
-        [DllImport("Microsoft.Terminal.Control.dll", CallingConvention = CallingConvention.StdCall, PreserveSig = false)]
-        public static extern void TerminalSetCursorVisible(IntPtr terminal, bool visible);
 
         [DllImport("user32.dll", SetLastError = true)]
         public static extern IntPtr SetFocus(IntPtr hWnd);

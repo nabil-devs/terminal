@@ -63,7 +63,7 @@ RECT HwndTerminal::TsfDataProvider::GetCursorPosition()
     til::size fontSize;
     {
         const auto lock = _terminal->_terminal->LockForReading();
-        cursorPos = _terminal->_terminal->GetCursorPosition(); // measured in terminal cells
+        cursorPos = _terminal->_terminal->GetTextBuffer().GetCursor().GetPosition(); // measured in terminal cells
         fontSize = _terminal->_actualFont.GetSize(); // measured in pixels, not DIP
     }
     POINT ptSuggestion = {
@@ -303,6 +303,7 @@ HRESULT HwndTerminal::Initialize()
 
     _terminal->Create({ 80, 25 }, 9001, *_renderer);
     _terminal->SetWriteInputCallback([=](std::wstring_view input) noexcept { _WriteTextToConnection(input); });
+    _terminal->SetCopyToClipboardCallback([=](wil::zwstring_view text) noexcept { _CopyTextToSystemClipboard(text, {}, {}); });
     _renderer->EnablePainting();
 
     _multiClickTime = std::chrono::milliseconds{ GetDoubleClickTime() };
@@ -320,6 +321,10 @@ try
     // Shut down the renderer (and therefore the thread) before we implode
     _renderer.reset();
     _renderEngine.reset();
+
+    // These two callbacks have a dangling reference to `this`; let's just clear them
+    _terminal->SetWriteInputCallback(nullptr);
+    _terminal->SetCopyToClipboardCallback(nullptr);
 
     if (auto localHwnd{ _hwnd.release() })
     {
@@ -701,15 +706,6 @@ void HwndTerminal::_ClearSelection()
     _renderer->TriggerSelection();
 }
 
-void _stdcall TerminalClearSelection(void* terminal)
-try
-{
-    const auto publicTerminal = static_cast<HwndTerminal*>(terminal);
-    const auto lock = publicTerminal->_terminal->LockForWriting();
-    publicTerminal->_ClearSelection();
-}
-CATCH_LOG()
-
 bool _stdcall TerminalIsSelectionActive(void* terminal)
 try
 {
@@ -967,6 +963,7 @@ void _stdcall TerminalSetTheme(void* terminal, TerminalTheme theme, LPCWSTR font
         publicTerminal->_terminal->SetCursorStyle(static_cast<Microsoft::Console::VirtualTerminal::DispatchTypes::CursorStyle>(theme.CursorStyle));
 
         publicTerminal->_desiredFont = { fontFamily, 0, DEFAULT_FONT_WEIGHT, static_cast<float>(fontSize), CP_UTF8 };
+        publicTerminal->_desiredFont.SetEnableBuiltinGlyphs(true);
         publicTerminal->_UpdateFont(newDpi);
     }
 
@@ -980,60 +977,52 @@ void _stdcall TerminalSetTheme(void* terminal, TerminalTheme theme, LPCWSTR font
     publicTerminal->Refresh(windowSize, &dimensions);
 }
 
-void _stdcall TerminalBlinkCursor(void* terminal)
-try
+void __stdcall TerminalSetFocused(void* terminal, bool focused)
 {
-    const auto publicTerminal = static_cast<const HwndTerminal*>(terminal);
-    if (!publicTerminal || !publicTerminal->_terminal)
+    const auto publicTerminal = static_cast<HwndTerminal*>(terminal);
+    publicTerminal->_setFocused(focused);
+}
+
+void HwndTerminal::_setFocused(bool focused) noexcept
+{
+    if (_focused == focused)
     {
         return;
     }
 
-    const auto lock = publicTerminal->_terminal->LockForWriting();
-    publicTerminal->_terminal->BlinkCursor();
-}
-CATCH_LOG()
-
-void _stdcall TerminalSetCursorVisible(void* terminal, const bool visible)
-try
-{
-    const auto publicTerminal = static_cast<const HwndTerminal*>(terminal);
-    if (!publicTerminal || !publicTerminal->_terminal)
+    TerminalInput::OutputType out;
     {
-        return;
+        const auto lock = _terminal->LockForWriting();
+
+        _focused = focused;
+
+        if (focused)
+        {
+            if (!_tsfHandle)
+            {
+                _tsfHandle = Microsoft::Console::TSF::Handle::Create();
+                _tsfHandle.AssociateFocus(&_tsfDataProvider);
+            }
+
+            if (const auto uiaEngine = _uiaEngine.get())
+            {
+                LOG_IF_FAILED(uiaEngine->Enable());
+            }
+        }
+        else
+        {
+            if (const auto uiaEngine = _uiaEngine.get())
+            {
+                LOG_IF_FAILED(uiaEngine->Disable());
+            }
+        }
+
+        _renderer->AllowCursorVisibility(Microsoft::Console::Render::InhibitionSource::Host, focused);
+        out = _terminal->FocusChanged(focused);
     }
-    const auto lock = publicTerminal->_terminal->LockForWriting();
-    publicTerminal->_terminal->SetCursorOn(visible);
-}
-CATCH_LOG()
-
-void __stdcall TerminalSetFocus(void* terminal)
-{
-    const auto publicTerminal = static_cast<HwndTerminal*>(terminal);
-    publicTerminal->_focused = true;
-    if (auto uiaEngine = publicTerminal->_uiaEngine.get())
+    if (out)
     {
-        LOG_IF_FAILED(uiaEngine->Enable());
-    }
-    publicTerminal->_FocusTSF();
-}
-
-void HwndTerminal::_FocusTSF() noexcept
-{
-    if (!_tsfHandle)
-    {
-        _tsfHandle = Microsoft::Console::TSF::Handle::Create();
-        _tsfHandle.AssociateFocus(&_tsfDataProvider);
-    }
-}
-
-void __stdcall TerminalKillFocus(void* terminal)
-{
-    const auto publicTerminal = static_cast<HwndTerminal*>(terminal);
-    publicTerminal->_focused = false;
-    if (auto uiaEngine = publicTerminal->_uiaEngine.get())
-    {
-        LOG_IF_FAILED(uiaEngine->Disable());
+        _WriteTextToConnection(*out);
     }
 }
 
@@ -1043,7 +1032,7 @@ void __stdcall TerminalKillFocus(void* terminal)
 // - text - selected text in plain-text format
 // - htmlData - selected text in HTML format
 // - rtfData - selected text in RTF format
-HRESULT HwndTerminal::_CopyTextToSystemClipboard(const std::wstring& text, const std::string& htmlData, const std::string& rtfData) const
+HRESULT HwndTerminal::_CopyTextToSystemClipboard(wil::zwstring_view text, wil::zstring_view htmlData, wil::zstring_view rtfData) const
 try
 {
     RETURN_HR_IF_NULL(E_NOT_VALID_STATE, _terminal);
@@ -1099,7 +1088,7 @@ CATCH_RETURN()
 // Arguments:
 // - stringToCopy - The string to copy
 // - lpszFormat - the name of the format
-HRESULT HwndTerminal::_CopyToSystemClipboard(const std::string& stringToCopy, LPCWSTR lpszFormat) const
+HRESULT HwndTerminal::_CopyToSystemClipboard(wil::zstring_view stringToCopy, LPCWSTR lpszFormat) const
 {
     const auto cbData = stringToCopy.size() + 1; // +1 for '\0'
     if (cbData)
