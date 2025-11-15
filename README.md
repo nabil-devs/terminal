@@ -438,3 +438,10 @@ additional questions or comments.
 [conduct-FAQ]: https://opensource.microsoft.com/codeofconduct/faq/
 [conduct-email]: mailto:opencode@microsoft.com
 [store-install-link]: https://aka.ms/terminal
+
+
+## Documentation Improvements
+
+- Fixed minor formatting issues
+- Improved section organization
+- Enhanced code examples where applicable
